@@ -143,7 +143,7 @@ class PolEmbed(lib.StreamObject):
             logger.info(self, output)
         cppe_state = cppe.CppeState(self.options, cppe_mol, callback)
         cppe_state.calculate_static_energies_and_fields()
-        logger.info(self, "Static energies and fields computed")
+        # logger.info(self, "Static energies and fields computed")
         return cppe_state
 
     def reset(self, mol=None):
@@ -177,8 +177,16 @@ class PolEmbed(lib.StreamObject):
         dms = dms.reshape(-1,nao,nao)
         n_dm = dms.shape[0]
 
+        max_memory = max(0, self.max_memory - lib.current_memory()[0])
+        max_memreq = 3 * nao**2 * len(self.potentials) * 8.0/1e6
+        if max_memreq < max_memory:
+            n_chunks = 1
+        else:
+            n_chunks = int(max_memreq // max_memory + 2)
+        # print("Chunks", n_chunks, "max_memory", max_memory, "max_memreq", max_memreq)
+
         if self.V_es is None:
-            logger.info(self, "Computing electrostatics operator")
+            # logger.info(self, "Computing electrostatics operator")
             positions = numpy.array([p.position for p in self.potentials])
             moments = []
             orders = []
@@ -189,15 +197,14 @@ class PolEmbed(lib.StreamObject):
                     p_moments.append(m.values)
                 orders.append(m.k)
                 moments.append(p_moments)
-            self.V_es = self._compute_multipole_potential_integrals(positions, orders, moments)
+            self.V_es = self._compute_multipole_potential_integrals(positions, orders, moments, n_chunks)
 
-        logger.info(self, "Computing electrostatics energy")
+        # logger.info(self, "Computing electrostatics energy")
         e_static = numpy.einsum('ij,xij->x', self.V_es, dms)
         self.cppe_state.energies["Electrostatic"]["Electronic"] = (
             e_static[0]
         )
 
-        # TODO: cache...
         positions = self.cppe_state.positions_polarizable
         n_sites = positions.shape[0]
         V_ind = numpy.zeros((n_dm, nao, nao))
@@ -205,10 +212,7 @@ class PolEmbed(lib.StreamObject):
         e_tot = []
         e_pol = []
         if n_sites > 0:
-            logger.info(self, "Computing field integrals")
-            #:elec_fields = self._compute_field(positions, dms)
-            # TODO: select chunk number...
-            n_chunks = 100
+            # logger.info(self, "Computing field integrals")
             chunks = numpy.array_split(positions, n_chunks)
             elec_fields_chunk = []
             for chunk in chunks:
@@ -228,8 +232,12 @@ class PolEmbed(lib.StreamObject):
                 e_pol.append(self.cppe_state.energies["Polarization"]["Electronic"])
 
             induced_moments = induced_moments.reshape(n_dm, n_sites, 3)
-            #:V_ind = self._compute_field_integrals(positions, induced_moments)
-            V_ind = numpy.einsum('aijg,nga->nij', j3c, -induced_moments)
+            induced_moments_chunked = numpy.array_split(induced_moments, n_chunks, axis=1)
+            V_ind = 0
+            for pos_chunk, ind_chunk in zip(chunks, induced_moments_chunked):
+                fakemol = gto.fakemol_for_charges(pos_chunk)
+                j3c = df.incore.aux_e2(self.mol, fakemol, intor='int3c2e_ip1')
+                V_ind += numpy.einsum('aijg,nga->nij', j3c, -ind_chunk)
             V_ind = V_ind + V_ind.transpose(0, 2, 1)
 
         if not elec_only:
@@ -242,17 +250,15 @@ class PolEmbed(lib.StreamObject):
         if is_single_dm:
             e = e[0]
             vmat = vmat[0]
-        logger.info(self, "PE done")
+        # logger.info(self, "PE done")
         return e, vmat
 
-    def _compute_multipole_potential_integrals(self, all_sites, all_orders, all_moments):
+    def _compute_multipole_potential_integrals(self, all_sites, all_orders, all_moments, n_chunks=1):
         all_orders = numpy.asarray(all_orders)
         if numpy.any(all_orders > 2):
             raise NotImplementedError("""Multipole potential integrals not
                                       implemented for order > 2.""")
 
-        # TODO: set automatically
-        n_chunks = 20
         chunks = numpy.array_split(all_sites, n_chunks)
         chunks_o = numpy.array_split(all_orders, n_chunks)
         chunks_m = numpy.array_split(all_moments, n_chunks)
