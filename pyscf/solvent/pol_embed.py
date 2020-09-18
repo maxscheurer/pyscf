@@ -177,11 +177,10 @@ class PolEmbed(lib.StreamObject):
         dms = dms.reshape(-1,nao,nao)
         n_dm = dms.shape[0]
 
-        max_memory = max(0, self.max_memory - lib.current_memory()[0])
+        max_memory = self.max_memory #max(0, self.max_memory - lib.current_memory()[0])
         max_memreq = 3 * nao**2 * len(self.potentials) * 8.0/1e6
-        if max_memreq < max_memory:
-            n_chunks = 1
-        else:
+        n_chunks = 1
+        if max_memreq >= max_memory:
             n_chunks = int(max_memreq // max_memory + 2)
         # print("Chunks", n_chunks, "max_memory", max_memory, "max_memreq", max_memreq)
 
