@@ -114,6 +114,7 @@ class PolEmbed(lib.StreamObject):
         self.cppe_state = self._create_cppe_state(mol)
         self.potentials = self.cppe_state.potentials
         self.V_es = None
+        self.eef = False
 
         # e (the electrostatic and induction energy)
         # and v (the additional potential) are
@@ -168,6 +169,24 @@ class PolEmbed(lib.StreamObject):
         self.e = e
         self.v = v
         return e, v
+    
+    def effective_dipole_operator(self):
+        """
+        Compute the derivatives of induced moments wrt each coordinate
+        and form integrals for effective dipole operator (EEF)
+        """
+        dips = self.mol.intor_symmetric('int1e_r', comp=3)
+        if self.eef:
+            logger.info(self, "Computing effective dipole operator for EEF.")
+            positions = self.cppe_state.positions_polarizable
+            n_sites = positions.shape[0]
+            induced_moments = self.cppe_state.induced_moments_eef()
+            induced_moments = induced_moments.reshape(n_sites, 3, 3)
+            fakemol = gto.fakemol_for_charges(positions)
+            j3c = df.incore.aux_e2(self.mol, fakemol, intor='int3c2e_ip1')
+            V_ind = numpy.einsum('aijg,gax->xij', j3c, -induced_moments)
+            dips += V_ind + V_ind.transpose(0, 2, 1)
+        return list(dips)
 
     def _exec_cppe(self, dm, elec_only=False):
         dms = numpy.asarray(dm)
