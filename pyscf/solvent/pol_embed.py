@@ -303,7 +303,7 @@ class PolEmbed(lib.StreamObject):
         
         e_ecp = 0.0
         if self.do_ecp:
-            e_ecp = numpy.einsum('ij,xij->x', self.V_ecp, dms)
+            e_ecp = numpy.einsum('ij,xij->x', self.V_ecp, dms)[0]
 
         positions = self.cppe_state.positions_polarizable
         n_sites = positions.shape[0]
