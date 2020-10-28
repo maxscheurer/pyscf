@@ -344,7 +344,7 @@ class PolEmbed(lib.StreamObject):
 
         if not elec_only:
             vmat = self.V_es + V_ind
-            if self.ecpmol:
+            if self.do_ecp:
                 vmat += self.V_ecp
             e = numpy.array(e_tot)
         else:

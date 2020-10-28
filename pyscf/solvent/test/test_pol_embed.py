@@ -109,6 +109,7 @@ EXCLISTS
 2       1    3    4
 3       1    2    4
 4       1    2    3''')
+potf2.flush()
 potfile2 = potf2.name
 
 mol2 = gto.M(
