@@ -209,6 +209,7 @@ class PolEmbed(lib.StreamObject):
         option_keys = cppe.valid_option_keys
         logger.info(self, 'frozen = %s'       , self.frozen)
         logger.info(self, 'equilibrium_solvation = %s', self.equilibrium_solvation)
+        logger.info(self, 'pe(ecp) repulsive potentials = %s', self.do_ecp)
         for key in option_keys:
             logger.info(self, "cppe.%s = %s", key, options[key])
         return self
