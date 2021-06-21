@@ -437,7 +437,10 @@ class PolEmbed(lib.StreamObject):
         return numpy.asarray(v_pe_ao).reshape(dm_shape)
 
     def nuc_grad_method(self, grad_method):
-        raise NotImplementedError("Nuclear gradients not implemented for PE.")
+        from pyscf.solvent import pol_embed_grad
+        if self.frozen:
+            raise NotImplementedError()
+        return pol_embed_grad.make_grad_object(grad_method)
 
 if __name__ == '__main__':
     import tempfile
