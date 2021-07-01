@@ -24,7 +24,7 @@ import numpy
 from pyscf import lib
 from pyscf.lib import logger
 from pyscf import gto
-from pyscf import df
+from pyscf import df, scf
 from pyscf.solvent._attach_solvent import _Solvation
 from pyscf.grad import rhf as rhf_grad
 from pyscf.grad import rks as rks_grad
@@ -45,6 +45,8 @@ def make_grad_object(grad_method):
     if grad_method.base.with_solvent.frozen:
         raise RuntimeError('Frozen solvent model is not avialbe for energy gradients')
     logger.warn(grad_method, "PE gradients are not optimized for performance.")
+    if not isinstance(grad_method.base, scf.hf.SCF):
+        raise NotImplementedError("PE gradients only implemented for SCF methods.")
 
     grad_method_class = grad_method.__class__
     class WithSolventGrad(grad_method_class):
