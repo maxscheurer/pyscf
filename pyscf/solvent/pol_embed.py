@@ -152,7 +152,6 @@ def _get_element_row(symbol):
                                   "second, and third row elements")
     return element_row
 
-
 class PolEmbed(lib.StreamObject):
     def __init__(self, mol, options_or_potfile):
         self.mol = mol

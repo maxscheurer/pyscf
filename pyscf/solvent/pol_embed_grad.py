@@ -28,6 +28,13 @@ from pyscf import df
 from pyscf.solvent._attach_solvent import _Solvation
 from pyscf.grad import rhf as rhf_grad
 from pyscf.grad import rks as rks_grad
+import sys
+try:
+    import cppe
+except ModuleNotFoundError:
+    sys.stderr.write('cppe library was not found\n')
+    sys.stderr.write(__doc__)
+    raise
 
 
 def make_grad_object(grad_method):
@@ -37,6 +44,7 @@ def make_grad_object(grad_method):
     assert isinstance(grad_method.base, _Solvation)
     if grad_method.base.with_solvent.frozen:
         raise RuntimeError('Frozen solvent model is not avialbe for energy gradients')
+    logger.warn(grad_method, "PE gradients are not optimized for performance.")
 
     grad_method_class = grad_method.__class__
     class WithSolventGrad(grad_method_class):
@@ -74,18 +82,49 @@ def make_grad_object(grad_method):
 
 
 def kernel(peobj, dm, verbose=None):
-    import cppe
     if not (isinstance(dm, numpy.ndarray) and dm.ndim == 2):
-        # UHF density matrix
         dm = dm[0] + dm[1]
+    if peobj.do_ecp:
+        raise NotImplementedError("Gradients for PE(ECP) not implemented.")
 
     mol = peobj.mol
     natoms = mol.natm
     de = numpy.zeros((natoms, 3))
     cppe_state = peobj.cppe_state
     nuc_ee_grad = cppe_state.nuclear_interaction_energy_gradient()
-    elec_ee_grad = numpy.zeros_like(nuc_ee_grad)
+    op = _grad_electrostatic_elec(mol, peobj)
 
+    # induction part
+    positions = cppe_state.positions_polarizable
+    n_polsites = positions.shape[0]
+    if n_polsites > 0:
+        nuc_field_grad = cppe_state.nuclear_field_gradient().reshape(natoms, 3, n_polsites, 3)
+        mu_hf = _induced_moments(mol, peobj, positions, dm, elec_only=False)
+        v = _grad_induction_elec(mol, positions, mu_hf)
+        grad_induction_nuc = -numpy.einsum("acpk,pk->ac", nuc_field_grad, mu_hf)
+        de += grad_induction_nuc
+        op += v
+    elec_ee_grad = _grad_from_operator(mol, op, dm)
+    de += nuc_ee_grad + elec_ee_grad
+    return de
+
+
+def _grad_from_operator(mol, op, dm):
+    natoms = mol.natm
+    ao_slices = mol.aoslice_by_atom()
+    grad = numpy.zeros((natoms, 3))
+    for ia in range(natoms):
+        k0, k1 = ao_slices[ia, 2:]
+        # if peobj.do_ecp:
+        #     op[:, k0:k1] += peobj.ecpmol.intor('ECPscalar_ipnuc', comp=3)[:, k0:k1]
+        Dx_a = numpy.zeros_like(op)
+        Dx_a[:, k0:k1] = op[:, k0:k1]
+        Dx_a += Dx_a.transpose(0, 2, 1)
+        grad[ia] -= numpy.einsum("xpq,pq", Dx_a, dm)
+    return grad
+
+
+def _grad_electrostatic_elec(mol, peobj):
     positions = numpy.array([p.position for p in peobj.potentials])
     moments = []
     orders = []
@@ -121,11 +160,6 @@ def kernel(peobj, dm, verbose=None):
     if numpy.any(orders >= 2):
         idx = numpy.where(orders >= 2)[0]
         n_sites = idx.size
-        # moments_2 is the lower triangle of
-        # [[XX, XY, XZ], [YX, YY, YZ], [ZX, ZY, ZZ]] i.e.
-        # XX, XY, XZ, YY, YZ, ZZ = 0,1,2,4,5,8
-        # symmetrize it to the upper triangle part
-        # XX, YX, ZX, YY, ZY, ZZ = 0,3,6,4,7,8
         m2 = numpy.einsum('ga,a->ga', [moments[i][2] for i in idx],
                           cppe.prefactors(2))
         moments_2 = numpy.zeros((n_sites, 9))
@@ -141,42 +175,30 @@ def kernel(peobj, dm, verbose=None):
                 op += numpy.einsum('caij,a->cij', int1, moments_2[ii])
                 op += numpy.einsum('caji,a->cij', int3, moments_2[ii])
                 op += 2.0 * numpy.einsum('caij,a->cij', int2, moments_2[ii])
-    
-    # induction part
-    positions = cppe_state.positions_polarizable
+    return op
+
+
+def _induced_moments(mol, peobj, positions, dm_fields, elec_only=False):
+    # TODO: refactor with normal pol_embed file...
+    cppe_state = peobj.cppe_state
     n_polsites = positions.shape[0]
-    if n_polsites > 0:
-        nuc_field_grad = cppe_state.nuclear_field_gradient().reshape(natoms, 3, n_polsites, 3)
-        fakemol = gto.fakemol_for_charges(positions)
-        j3c = df.incore.aux_e2(mol, fakemol, intor='int3c2e_ip1')
-        elf = numpy.einsum('aijg,ij->ga', j3c, dm) + numpy.einsum('aijg,ji->ga', j3c, dm)
-        peobj.cppe_state.update_induced_moments(elf.ravel(), False)
-        induced_moments = numpy.array(cppe_state.get_induced_moments()).reshape(n_polsites, 3)
-        grad_induction_nuc = -numpy.einsum("acpk,pk->ac", nuc_field_grad, induced_moments)
-        de += grad_induction_nuc
+    fakemol = gto.fakemol_for_charges(positions)
+    j3c = df.incore.aux_e2(mol, fakemol, intor='int3c2e_ip1')
+    elf = numpy.einsum('aijg,ij->ga', j3c, dm_fields) + numpy.einsum('aijg,ji->ga', j3c, dm_fields)
+    peobj.cppe_state.update_induced_moments(elf.ravel(), elec_only)
+    induced_moments = numpy.array(cppe_state.get_induced_moments()).reshape(n_polsites, 3)
+    return induced_moments
 
-        # refactor...
-        integral11 = df.incore.aux_e2(mol, fakemol, intor='int3c2e_ipip1', comp=9)
-        integral12 = df.incore.aux_e2(mol, fakemol, intor='int3c2e_ipvip1', comp=9)
 
-        integral11 = integral11.reshape(3, 3, *integral11.shape[1:])
-        integral12 = integral12.reshape(3, 3, *integral12.shape[1:])
+def _grad_induction_elec(mol, positions, induced_moments):
+    # TODO: refactor
+    fakemol = gto.fakemol_for_charges(positions)
+    integral11 = df.incore.aux_e2(mol, fakemol, intor='int3c2e_ipip1', comp=9)
+    integral12 = df.incore.aux_e2(mol, fakemol, intor='int3c2e_ipvip1', comp=9)
 
-        v = numpy.einsum('caijg,ga,a->cij', integral11, induced_moments, cppe.prefactors(1))
-        v += numpy.einsum('caijg,ga,a->cij', integral12, induced_moments, cppe.prefactors(1))
-        op += v
+    integral11 = integral11.reshape(3, 3, *integral11.shape[1:])
+    integral12 = integral12.reshape(3, 3, *integral12.shape[1:])
 
-    ao_slices = mol.aoslice_by_atom()
-    for ia in range(natoms):
-        k0, k1 = ao_slices[ia, 2:]
-
-        if peobj.do_ecp:
-            op[:, k0:k1] += peobj.ecpmol.intor('ECPscalar_ipnuc', comp=3)[:, k0:k1]
-
-        Dx_a = numpy.zeros_like(op)
-        Dx_a[:, k0:k1] = op[:, k0:k1]
-        Dx_a += Dx_a.transpose(0, 2, 1)
-        elec_ee_grad[ia] -= numpy.einsum("xpq,pq", Dx_a, dm)
-    de += nuc_ee_grad + elec_ee_grad
-    return de
-    
+    v = numpy.einsum('caijg,ga,a->cij', integral11, induced_moments, cppe.prefactors(1))
+    v += numpy.einsum('caijg,ga,a->cij', integral12, induced_moments, cppe.prefactors(1))
+    return v
